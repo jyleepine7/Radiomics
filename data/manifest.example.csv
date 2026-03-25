@@ -1,0 +1,4 @@
+patient_id,image_path,mask_path
+L001,/absolute/path/to/L001_ct.nii.gz,/absolute/path/to/L001_mask.nii.gz
+L002,/absolute/path/to/L002_ct.nii.gz,/absolute/path/to/L002_mask.nii.gz
+

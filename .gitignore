@@ -1,0 +1,16 @@
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.venv/
+.DS_Store
+.ipynb_checkpoints/
+artifacts/
+*.pt
+*.pth
+*.pyc
+*.nii
+*.nii.gz
+*.dcm
+*.dicom
+*.nrrd
+config.json

@@ -1,0 +1,50 @@
+{
+  "manifest_path": "data/manifest.example.csv",
+  "output_dir": "artifacts",
+  "checkpoint_filename": "unet_best.pt",
+  "preprocessing": {
+    "target_height": 256,
+    "target_width": 256,
+    "hu_min": -1000,
+    "hu_max": 400,
+    "min_mask_pixels": 8,
+    "bbox_margin": 16
+  },
+  "training": {
+    "batch_size": 8,
+    "epochs": 30,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "validation_fraction": 0.2,
+    "random_seed": 42,
+    "num_workers": 0,
+    "early_stopping_patience": 8
+  },
+  "model": {
+    "in_channels": 1,
+    "out_channels": 1,
+    "base_channels": 16,
+    "dropout": 0.1,
+    "embedding_pool": "avg"
+  },
+  "features": {
+    "batch_size": 16,
+    "aggregate_mean": true,
+    "aggregate_max": true,
+    "output_filename": "deep_features.csv"
+  },
+  "tabular": {
+    "xlsx_path": "data/Radiomics_Clinical.xlsx",
+    "prepared_output_filename": "prepared_dataset.csv",
+    "evaluation_output_filename": "endpoint_metrics.json",
+    "predictions_output_filename": "endpoint_predictions.csv",
+    "radiomics_aggregations": [
+      "mean",
+      "max"
+    ],
+    "endpoint_windows_months": [
+      12,
+      36
+    ]
+  }
+}
