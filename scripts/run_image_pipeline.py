@@ -56,6 +56,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional prepared CSV override. Defaults to output_dir/prepared_dataset.csv.",
     )
 
+    plot_parser = subparsers.add_parser(
+        "plot-roc",
+        help="Plot ROC curve PNG files from endpoint_predictions.csv.",
+    )
+    plot_parser.add_argument("--config", required=True, help="Path to the JSON config.")
+    plot_parser.add_argument(
+        "--predictions-path",
+        default=None,
+        help="Optional endpoint predictions CSV override. Defaults to output_dir/endpoint_predictions.csv.",
+    )
+    plot_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override. Defaults to output_dir/roc_curves.",
+    )
+    plot_parser.add_argument(
+        "--ensemble-only",
+        action="store_true",
+        help="Only plot the ensemble ROC curve instead of all base learners.",
+    )
+
     return parser
 
 
@@ -82,6 +103,16 @@ def main() -> None:
         from nsclc_unet.modeling import fit_endpoint_models
 
         fit_endpoint_models(config, prepared_table_path=Path(args.table_path) if args.table_path else None)
+    elif args.command == "plot-roc":
+        from nsclc_unet.plotting import plot_endpoint_roc_curves
+
+        predictions_path = Path(args.predictions_path) if args.predictions_path else config.prediction_output_path
+        output_dir = Path(args.output_dir) if args.output_dir else (config.output_dir / "roc_curves")
+        plot_endpoint_roc_curves(
+            predictions_path=predictions_path,
+            output_dir=output_dir,
+            include_base_models=not args.ensemble_only,
+        )
     else:
         parser.error(f"Unsupported command: {args.command}")
 

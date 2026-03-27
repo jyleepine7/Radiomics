@@ -4,5 +4,6 @@ torch>=2.3
 nibabel>=5.2
 pydicom>=2.4
 scikit-learn>=1.5
+matplotlib>=3.8
 # Optional but useful for some DICOM series layouts:
 # SimpleITK>=2.3

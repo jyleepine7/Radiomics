@@ -159,6 +159,17 @@ python3 scripts/run_image_pipeline.py fit-endpoints --config config.example.json
 - `artifacts/endpoint_metrics.json`
 - `artifacts/endpoint_predictions.csv`
 
+ROC curve PNG 생성:
+
+```bash
+python3 scripts/run_image_pipeline.py plot-roc --config config.example.json
+```
+
+결과물:
+- `artifacts/roc_curves/roc_label_os_12m.png`
+- `artifacts/roc_curves/roc_label_pfs_12m.png`
+- 기타 endpoint별 ROC PNG
+
 ## 구현 메모
 
 - Clinical 시트는 빈 셀이 많고, Radiomics 시트는 헤더가 한 칸 어긋난 구조가 있어서, `openpyxl` 없이도 읽히도록 XML 기반 `.xlsx` 파서를 직접 넣었습니다.
