@@ -6,6 +6,9 @@ from pathlib import Path
 import numpy as np
 
 
+PNG_LIKE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+
+
 def _load_nifti(path: Path) -> np.ndarray:
     try:
         import nibabel as nib
@@ -79,10 +82,40 @@ def _load_dicom_with_pydicom(path: Path) -> np.ndarray:
     return np.stack([pixel_array for _, pixel_array in slices], axis=0).astype(np.float32)
 
 
+def _read_png_file(file: Path) -> np.ndarray:
+    try:
+        from PIL import Image
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("Pillow is required to load PNG stacks.") from exc
+
+    with Image.open(file) as image:
+        array = np.asarray(image, dtype=np.float32)
+    if array.ndim == 3:
+        # If a grayscale PNG was saved with redundant channels, keep one channel.
+        array = array[..., 0]
+    return array.astype(np.float32)
+
+
+def _load_png_stack(path: Path) -> np.ndarray:
+    try:
+        from PIL import Image
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("Pillow is required to load PNG stacks.") from exc
+
+    image_files = sorted(file for file in path.iterdir() if file.is_file() and file.suffix.lower() in PNG_LIKE_SUFFIXES)
+    if not image_files:
+        raise ValueError(f"No PNG/JPG/TIFF/BMP slices found in directory: {path}")
+
+    slices = [_read_png_file(file) for file in image_files]
+    return np.stack(slices, axis=0).astype(np.float32)
+
+
 def load_volume(path: Path) -> np.ndarray:
     resolved = path.resolve()
 
     if resolved.is_dir():
+        if any(file.is_file() and file.suffix.lower() in PNG_LIKE_SUFFIXES for file in resolved.iterdir()):
+            return _load_png_stack(resolved)
         try:
             return _load_dicom_with_simpleitk(resolved)
         except ModuleNotFoundError:
@@ -98,8 +131,32 @@ def load_volume(path: Path) -> np.ndarray:
 
 
 def load_case(image_path: Path, mask_path: Path) -> tuple[np.ndarray, np.ndarray]:
-    image = load_volume(image_path).astype(np.float32)
-    mask = load_volume(mask_path).astype(np.float32)
+    image_path = image_path.resolve()
+    mask_path = mask_path.resolve()
+
+    if image_path.is_dir() and mask_path.is_dir():
+        image_files = {
+            file.name: file
+            for file in image_path.iterdir()
+            if file.is_file() and file.suffix.lower() in PNG_LIKE_SUFFIXES
+        }
+        mask_files = {
+            file.name: file
+            for file in mask_path.iterdir()
+            if file.is_file() and file.suffix.lower() in PNG_LIKE_SUFFIXES
+        }
+        if image_files and mask_files:
+            shared_names = sorted(set(image_files).intersection(mask_files))
+            if not shared_names:
+                raise ValueError(f"No overlapping PNG slice names between {image_path} and {mask_path}")
+            image = np.stack([_read_png_file(image_files[name]) for name in shared_names], axis=0).astype(np.float32)
+            mask = np.stack([_read_png_file(mask_files[name]) for name in shared_names], axis=0).astype(np.float32)
+        else:
+            image = load_volume(image_path).astype(np.float32)
+            mask = load_volume(mask_path).astype(np.float32)
+    else:
+        image = load_volume(image_path).astype(np.float32)
+        mask = load_volume(mask_path).astype(np.float32)
 
     if image.shape != mask.shape:
         raise ValueError(
@@ -120,4 +177,3 @@ def save_feature_rows(rows: list[dict[str, str | float]], output_path: Path) -> 
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-

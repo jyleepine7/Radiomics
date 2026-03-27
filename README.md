@@ -48,7 +48,23 @@ L002,/absolute/path/to/L002_ct.nii.gz,/absolute/path/to/L002_mask.nii.gz
 - `.nii.gz`
 - `.npy`
 - `.npz`
+- patient slice directory of `.png` / `.jpg` / `.tif`
 - DICOM directory (`pydicom` 또는 `SimpleITK` 필요)
+
+manifest 자동 생성:
+
+```bash
+python3 scripts/generate_manifest.py \
+  --images-root /path/to/images \
+  --masks-root /path/to/masks \
+  --output data/manifest.csv \
+  --image-suffix _ct \
+  --mask-suffix _mask
+```
+
+예:
+- `/path/to/images/L001_ct.npy` + `/path/to/masks/L001_mask.npy`
+- `/path/to/images/L001_ct/` + `/path/to/masks/L001_mask/`
 
 ## 사용법
 
