@@ -83,7 +83,12 @@ def read_xlsx_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
             "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
         ]
         target = relationship_map[relationship_id]
-        root = ET.fromstring(archive.read(f"xl/{target}"))
+        # Excel relationship targets are inconsistent across writers:
+        # some use "worksheets/sheet1.xml", others "xl/worksheets/sheet1.xml".
+        normalized_target = target.lstrip("/")
+        if not normalized_target.startswith("xl/"):
+            normalized_target = f"xl/{normalized_target}"
+        root = ET.fromstring(archive.read(normalized_target))
 
         sparse_rows: list[dict[int, str]] = []
         max_columns = 0
@@ -101,4 +106,3 @@ def read_xlsx_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
         dense_rows = [[row.get(column_index, "") for column_index in range(max_columns)] for row in sparse_rows]
         headers = _make_unique_headers(dense_rows[0])
         return pd.DataFrame(dense_rows[1:], columns=headers)
-

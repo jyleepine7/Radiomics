@@ -4,79 +4,63 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset
 
 from nsclc_unet.config import PipelineConfig
-from nsclc_unet.io import load_case, save_feature_rows
+from nsclc_unet.io import load_case_with_metadata, save_feature_rows
 from nsclc_unet.manifest import read_manifest
-from nsclc_unet.model import UNet2D
-from nsclc_unet.preprocess import extract_tumor_slices
+from nsclc_unet.model import build_feature_extractor, get_best_device
+from nsclc_unet.preprocess import prepare_tumor_volume
 
 
-def _build_model_from_checkpoint(config: PipelineConfig, checkpoint_path: Path, device: torch.device) -> UNet2D:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model = UNet2D(config.model).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-    return model
+def _rows_from_batch(patient_ids: list[str], embeddings: np.ndarray) -> list[dict[str, str | float]]:
+    rows: list[dict[str, str | float]] = []
+    for patient_id, embedding in zip(patient_ids, embeddings):
+        row: dict[str, str | float] = {"patient_id": patient_id}
+        for index, value in enumerate(embedding.tolist()):
+            row[f"deep_feat_{index:03d}"] = float(value)
+        rows.append(row)
+    return rows
 
 
-def _aggregate_embeddings(embeddings: np.ndarray, include_mean: bool, include_max: bool) -> np.ndarray:
-    parts = []
-    if include_mean:
-        parts.append(embeddings.mean(axis=0))
-    if include_max:
-        parts.append(embeddings.max(axis=0))
-    if not parts:
-        raise ValueError("At least one aggregation mode must be enabled.")
-    return np.concatenate(parts, axis=0)
+def _flush_volume_batch(
+    patient_ids: list[str],
+    pending_volumes: list[np.ndarray],
+    model: torch.nn.Module,
+    device: torch.device,
+) -> list[dict[str, str | float]]:
+    if not patient_ids:
+        return []
+
+    volume_batch = np.stack(pending_volumes, axis=0).astype(np.float32)
+    volume_tensor = torch.from_numpy(volume_batch[:, None, ...]).float().to(device)
+    with torch.no_grad():
+        embeddings = model(volume_tensor).detach().cpu().numpy()
+    return _rows_from_batch(patient_ids, embeddings)
 
 
 def extract_patient_embeddings(config: PipelineConfig, checkpoint_path: Path | None = None) -> Path:
     records = read_manifest(config.manifest_path)
+    device = get_best_device()
     checkpoint = checkpoint_path or config.checkpoint_path
-    if not checkpoint.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = _build_model_from_checkpoint(config, checkpoint, device)
+    checkpoint_override = checkpoint if checkpoint.exists() else None
+    model = build_feature_extractor(config.model, checkpoint_path=checkpoint_override, device=device)
 
     output_rows: list[dict[str, str | float]] = []
+    pending_ids: list[str] = []
+    pending_volumes: list[np.ndarray] = []
+
     for record in records:
-        image, mask = load_case(record.image_path, record.mask_path)
-        slices = extract_tumor_slices(image, mask, config.preprocessing)
-        image_batch = np.stack([image_slice for image_slice, _ in slices], axis=0).astype(np.float32)
-        image_tensor = torch.from_numpy(image_batch[:, None, ...]).float()
+        image, mask, spacing = load_case_with_metadata(record.image_path, record.mask_path)
+        volume, _ = prepare_tumor_volume(image, mask, config.preprocessing, spacing=spacing)
+        pending_ids.append(record.patient_id)
+        pending_volumes.append(volume)
 
-        dataset = TensorDataset(image_tensor)
-        loader = DataLoader(
-            dataset,
-            batch_size=config.features.batch_size,
-            shuffle=False,
-            num_workers=0,
-            pin_memory=torch.cuda.is_available(),
-        )
+        if len(pending_volumes) >= max(1, config.features.batch_size):
+            output_rows.extend(_flush_volume_batch(pending_ids, pending_volumes, model, device))
+            pending_ids = []
+            pending_volumes = []
 
-        batch_embeddings: list[np.ndarray] = []
-        with torch.no_grad():
-            for (images,) in loader:
-                images = images.to(device)
-                embeddings = model.extract_embedding(images).cpu().numpy()
-                batch_embeddings.append(embeddings)
-
-        patient_embeddings = np.concatenate(batch_embeddings, axis=0)
-        aggregated = _aggregate_embeddings(
-            patient_embeddings,
-            include_mean=config.features.aggregate_mean,
-            include_max=config.features.aggregate_max,
-        )
-
-        row: dict[str, str | float] = {"patient_id": record.patient_id}
-        for index, value in enumerate(aggregated.tolist()):
-            row[f"deep_feat_{index:03d}"] = float(value)
-        output_rows.append(row)
-
+    output_rows.extend(_flush_volume_batch(pending_ids, pending_volumes, model, device))
     save_feature_rows(output_rows, config.feature_output_path)
     print(f"Saved deep features to {config.feature_output_path}")
     return config.feature_output_path
-

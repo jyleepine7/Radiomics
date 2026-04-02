@@ -15,18 +15,21 @@ from nsclc_unet.tabular import prepare_tabular_dataset
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train a UNet and extract deep CT features.")
+    parser = argparse.ArgumentParser(description="Extract CT deep features with a MONAI 3D ResNet and fit endpoint models.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    train_parser = subparsers.add_parser("train", help="Train the segmentation UNet.")
+    train_parser = subparsers.add_parser(
+        "train",
+        help="Prepare and snapshot the MONAI 3D ResNet backbone checkpoint.",
+    )
     train_parser.add_argument("--config", required=True, help="Path to the JSON config.")
 
-    extract_parser = subparsers.add_parser("extract", help="Extract patient-level deep features.")
+    extract_parser = subparsers.add_parser("extract", help="Extract patient-level 3D deep features.")
     extract_parser.add_argument("--config", required=True, help="Path to the JSON config.")
     extract_parser.add_argument(
         "--checkpoint",
         default=None,
-        help="Optional checkpoint override. Defaults to output_dir/checkpoint_filename.",
+        help="Optional checkpoint override. If omitted, output_dir/checkpoint_filename is used when available.",
     )
 
     prepare_parser = subparsers.add_parser(
@@ -86,9 +89,9 @@ def main() -> None:
     config = load_config(Path(args.config))
 
     if args.command == "train":
-        from nsclc_unet.train import train_unet
+        from nsclc_unet.train import prepare_backbone_checkpoint
 
-        train_unet(config)
+        prepare_backbone_checkpoint(config)
     elif args.command == "extract":
         from nsclc_unet.features import extract_patient_embeddings
 

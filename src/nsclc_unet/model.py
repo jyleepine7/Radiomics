@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,95 +9,160 @@ import torch.nn.functional as F
 from nsclc_unet.config import ModelConfig
 
 
-class DoubleConv(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, dropout: float = 0.0) -> None:
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.block(x)
+def get_best_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
-class DownBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, dropout: float = 0.0) -> None:
-        super().__init__()
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.conv = DoubleConv(in_channels, out_channels, dropout=dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(self.pool(x))
-
-
-class UpBlock(nn.Module):
-    def __init__(self, in_channels: int, skip_channels: int, out_channels: int, dropout: float = 0.0) -> None:
-        super().__init__()
-        self.up = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
-        self.conv = DoubleConv(out_channels + skip_channels, out_channels, dropout=dropout)
-
-    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
-        x = self.up(x)
-        if x.shape[-2:] != skip.shape[-2:]:
-            x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
-        x = torch.cat([skip, x], dim=1)
-        return self.conv(x)
+def _require_monai() -> object:
+    try:
+        from monai.networks import nets
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "MONAI is required for the 3D ResNet feature extractor. Install it with `pip install monai`."
+        ) from exc
+    return nets
 
 
-class UNet2D(nn.Module):
+def _extract_state_dict(payload: object) -> dict[str, torch.Tensor]:
+    if isinstance(payload, dict):
+        for candidate_key in ("model_state_dict", "state_dict", "net", "network_state_dict"):
+            candidate = payload.get(candidate_key)
+            if isinstance(candidate, dict):
+                return candidate
+        if all(isinstance(value, torch.Tensor) for value in payload.values()):
+            return payload  # type: ignore[return-value]
+    raise ValueError("Unsupported checkpoint format for external weights.")
+
+
+def _strip_prefix_if_present(key: str, prefix: str) -> str:
+    if key.startswith(prefix):
+        return key[len(prefix) :]
+    return key
+
+
+def _sanitize_external_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    model_state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    sanitized: dict[str, torch.Tensor] = {}
+    for raw_key, tensor in state_dict.items():
+        key = raw_key
+        for prefix in ("module.", "backbone.", "model.", "resnet."):
+            key = _strip_prefix_if_present(key, prefix)
+
+        if key.startswith("fc.") or key.startswith("classifier.") or key.startswith("head."):
+            continue
+
+        target_tensor = model_state_dict.get(key)
+        if target_tensor is None:
+            continue
+        if target_tensor.shape != tensor.shape:
+            continue
+        sanitized[key] = tensor
+    return sanitized
+
+
+class MONAIResNetFeatureExtractor(nn.Module):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
-        base = config.base_channels
-        dropout = config.dropout
-
+        self.config = config
         self.embedding_pool = config.embedding_pool
-        self.inc = DoubleConv(config.in_channels, base, dropout=dropout)
-        self.down1 = DownBlock(base, base * 2, dropout=dropout)
-        self.down2 = DownBlock(base * 2, base * 4, dropout=dropout)
-        self.down3 = DownBlock(base * 4, base * 8, dropout=dropout)
-        self.bottleneck = DownBlock(base * 8, base * 16, dropout=dropout)
+        self.backbone = self._build_backbone(config)
+        if config.weights_path is not None:
+            self.load_external_weights(config.weights_path)
 
-        self.up1 = UpBlock(base * 16, base * 8, base * 8, dropout=dropout)
-        self.up2 = UpBlock(base * 8, base * 4, base * 4, dropout=dropout)
-        self.up3 = UpBlock(base * 4, base * 2, base * 2, dropout=dropout)
-        self.up4 = UpBlock(base * 2, base, base, dropout=dropout)
-        self.out_head = nn.Conv2d(base, config.out_channels, kernel_size=1)
+    def _build_backbone(self, config: ModelConfig) -> nn.Module:
+        nets = _require_monai()
+        factories = {
+            "resnet10": getattr(nets, "resnet10", None),
+            "resnet18": getattr(nets, "resnet18", None),
+            "resnet34": getattr(nets, "resnet34", None),
+            "resnet50": getattr(nets, "resnet50", None),
+        }
+        factory = factories.get(config.backbone_name)
+        if factory is None:
+            raise ValueError(
+                f"Unsupported MONAI backbone '{config.backbone_name}'. "
+                f"Choose one of: {sorted(name for name, fn in factories.items() if fn is not None)}"
+            )
 
-    def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        xb = self.bottleneck(x4)
-        return xb, (x1, x2, x3, x4)
+        return factory(
+            pretrained=False,
+            spatial_dims=3,
+            n_input_channels=config.in_channels,
+            conv1_t_size=config.conv1_t_size,
+            conv1_t_stride=config.conv1_t_stride,
+            no_max_pool=config.no_max_pool,
+            shortcut_type=config.shortcut_type,
+            widen_factor=config.widen_factor,
+            feed_forward=False,
+            bias_downsample=config.bias_downsample,
+        )
 
-    def decode(self, bottleneck: torch.Tensor, skips: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]) -> torch.Tensor:
-        x1, x2, x3, x4 = skips
-        x = self.up1(bottleneck, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
-        return self.out_head(x)
+    def load_external_weights(self, weights_path: Path) -> None:
+        resolved = weights_path.resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"External weights not found: {resolved}")
+
+        payload = torch.load(resolved, map_location="cpu")
+        external_state_dict = _extract_state_dict(payload)
+        current_state_dict = self.backbone.state_dict()
+        filtered_state_dict = _sanitize_external_state_dict(external_state_dict, current_state_dict)
+        if not filtered_state_dict:
+            raise ValueError(
+                f"No compatible backbone weights were found in {resolved}. "
+                "Check that the checkpoint matches the selected MONAI ResNet architecture."
+            )
+        missing, unexpected = self.backbone.load_state_dict(filtered_state_dict, strict=False)
+        print(
+            f"Loaded {len(filtered_state_dict)} backbone tensors from {resolved}. "
+            f"missing={len(missing)} unexpected={len(unexpected)}"
+        )
+
+    def _forward_backbone_feature_map(self, x: torch.Tensor) -> torch.Tensor:
+        model = self.backbone
+        x = model.conv1(x)
+        x = model.bn1(x)
+        if hasattr(model, "relu"):
+            x = model.relu(x)
+        elif hasattr(model, "act"):
+            x = model.act(x)
+        if not getattr(model, "no_max_pool", False) and hasattr(model, "maxpool"):
+            x = model.maxpool(x)
+        x = model.layer1(x)
+        x = model.layer2(x)
+        x = model.layer3(x)
+        x = model.layer4(x)
+        return x
 
     def extract_embedding(self, x: torch.Tensor) -> torch.Tensor:
-        bottleneck, _ = self.encode(x)
-        avg_pool = F.adaptive_avg_pool2d(bottleneck, output_size=1).flatten(start_dim=1)
+        feature_map = self._forward_backbone_feature_map(x)
+        avg_pool = F.adaptive_avg_pool3d(feature_map, output_size=1).flatten(start_dim=1)
         if self.embedding_pool == "avg_max":
-            max_pool = F.adaptive_max_pool2d(bottleneck, output_size=1).flatten(start_dim=1)
+            max_pool = F.adaptive_max_pool3d(feature_map, output_size=1).flatten(start_dim=1)
             return torch.cat([avg_pool, max_pool], dim=1)
         return avg_pool
 
-    def forward(self, x: torch.Tensor, return_embedding: bool = False) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        bottleneck, skips = self.encode(x)
-        logits = self.decode(bottleneck, skips)
-        if return_embedding:
-            embedding = self.extract_embedding(x)
-            return logits, embedding
-        return logits
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.extract_embedding(x)
 
+
+def build_feature_extractor(
+    config: ModelConfig,
+    checkpoint_path: Path | None = None,
+    device: torch.device | None = None,
+) -> MONAIResNetFeatureExtractor:
+    model = MONAIResNetFeatureExtractor(config)
+    checkpoint = checkpoint_path.resolve() if checkpoint_path is not None else None
+    if checkpoint is not None and checkpoint.exists():
+        payload = torch.load(checkpoint, map_location="cpu")
+        state_dict = _extract_state_dict(payload)
+        model.load_state_dict(state_dict, strict=False)
+    if device is not None:
+        model = model.to(device)
+    model.eval()
+    return model

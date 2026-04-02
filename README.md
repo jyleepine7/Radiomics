@@ -1,22 +1,23 @@
-# NSCLC CT UNet Pipeline
+# NSCLC CT 3D ResNet Pipeline
 
-이 프로젝트는 현재 `unbiased CT + segmented mask`만으로 돌아가는 이미지 중심 파이프라인입니다.
+이 프로젝트는 현재 `unbiased CT + segmented mask`에서 종양 volume을 잘라낸 뒤, `MONAI 3D ResNet`으로 deep feature를 추출하는 이미지 중심 파이프라인입니다.
 
 지금 구현한 범위:
 - 환자별 `image_path`, `mask_path` manifest 읽기
-- CT HU windowing, 종양 bounding box crop, axial slice 추출
-- 2D UNet segmentation 학습
-- 학습된 UNet bottleneck에서 환자별 deep radiomic embedding 추출
+- CT HU windowing, 종양 bounding box crop, spacing-aware 3D resample, fixed-size volume resize
+- MONAI 3D ResNet backbone checkpoint 준비
+- 환자별 penultimate deep embedding 추출
 - `Radiomics_Clinical.xlsx`에서 clinical/LIFEx sheet 직접 읽기
 - 12/36개월 OS/PFS endpoint 생성
 - clinical + LIFEx + deep feature를 합친 patient-level table 생성
 - nested CV 기반 endpoint 모델링
 
-논문 기반으로 반영한 가정:
-- CCI 논문에서 UNet 상세 구조가 없어서, 재현 가능한 표준 2D UNet encoder-decoder로 구현했습니다.
-- 현재 deep feature는 UNet bottleneck의 global average pooled slice embedding을 사용하고, 환자 단위에서 `mean + max`로 집계합니다.
-- 기본 `base_channels=16` 설정에서는 환자당 deep feature가 512개 생성되어, 논문에서 말하는 deep radiomics 규모를 비슷하게 맞추기 쉽습니다.
-- segmented mask가 이미 있으므로, 먼저 segmentation-supervised UNet을 학습하고 그 encoder feature를 downstream radiomics로 사용합니다.
+현재 가정:
+- UNet 재현 대신, `3D cropped tumor volume -> MONAI ResNet embedding` 흐름으로 방향을 바꿨습니다.
+- deep feature는 기본적으로 `layer4` 이후 global average pooling 결과를 사용합니다.
+- `weights_path`가 없으면 backbone은 랜덤 초기화 상태입니다.
+- `weights_path`에 MedicalNet/Med3D 계열 checkpoint를 넣으면 compatible tensor만 backbone에 로드합니다.
+- `resnet18` MedicalNet weight를 쓸 때는 `shortcut_type`을 `A`로 맞추는 게 중요합니다.
 - Clinical/LIFEx 부분은 원 논문의 survival ensemble을 완전히 그대로 복제한 것은 아니고, 현재 버전에서는 nested CV 위에 `logistic regression + random forest + SVM + gradient boosting + MLP` 평균 앙상블로 근사했습니다.
 
 ## 폴더 구조
@@ -78,7 +79,13 @@ pip install -r requirements.txt
 
 2. `config.example.json`을 복사해서 실제 경로로 수정
 
-3. UNet 학습
+중요:
+- `model.weights_path`는 선택 사항입니다.
+- Med3D/MedicalNet checkpoint를 직접 구해 놓았으면 그 경로를 넣으세요.
+- 비워두면 랜덤 초기화 backbone으로 feature를 추출합니다.
+- `resnet18` MedicalNet weight를 연결할 때는 `shortcut_type`을 `A`로 유지하세요.
+
+3. backbone checkpoint 준비
 
 ```bash
 python3 scripts/run_image_pipeline.py train --config config.example.json
@@ -91,13 +98,13 @@ python3 scripts/run_image_pipeline.py extract --config config.example.json
 ```
 
 결과물:
-- `artifacts/unet_best.pt`
-- `artifacts/training_history.json`
+- `artifacts/resnet18_backbone.pt`
+- `artifacts/backbone_summary.json`
 - `artifacts/deep_features.csv`
 
 ## Colab에서 5명만 빠르게 확인하기
 
-Colab에서는 전체 실험보다 `5명 정도로 코드가 실제로 돌아가고 bottleneck deep feature가 추출되는지`를 먼저 보는 게 안전합니다.
+Colab에서는 전체 실험보다 `5명 정도로 코드가 실제로 돌아가고 3D deep feature가 추출되는지`를 먼저 보는 게 안전합니다.
 
 1. 저장소와 의존성 설치
 
@@ -122,28 +129,51 @@ L002,/content/data/L002_ct.nii.gz,/content/data/L002_mask.nii.gz
 python3 scripts/run_colab_smoke_test.py \
   --manifest /content/data/manifest.csv \
   --output-dir /content/artifacts/colab_smoke_test \
-  --max-patients 5 \
-  --epochs 5 \
-  --batch-size 4 \
-  --base-channels 8
+  --max-patients 5
 ```
-
-이 스크립트가 하는 일:
-- manifest에서 5명만 선택
-- `manifest_subset.csv` 자동 생성
-- 작은 2D UNet을 짧게 학습
-- 환자별 bottleneck deep feature를 `deep_features.csv`로 저장
 
 생성 파일:
 - `artifacts/colab_smoke_test/manifest_subset.csv`
 - `artifacts/colab_smoke_test/run_summary.json`
-- `artifacts/colab_smoke_test/unet_best.pt`
-- `artifacts/colab_smoke_test/training_history.json`
+- `artifacts/colab_smoke_test/resnet18_backbone.pt`
 - `artifacts/colab_smoke_test/deep_features.csv`
 
-참고:
-- 현재 구현은 3D full-volume이 아니라 `tumor-containing axial slice` 기반 2D UNet입니다.
-- Colab에서는 먼저 이 smoke test로 파이프라인 검증 후, 이후 GPU 서버에서 더 큰 실험으로 확장하는 흐름을 권장합니다.
+## Colab에서 전체 파이프라인 한 번에 돌리기
+
+Drive에 아래 3개가 있다고 가정합니다.
+- `/content/drive/MyDrive/Radiomics_colab_data/data/manifest.colab.csv`
+- `/content/drive/MyDrive/Radiomics_colab_data/Radiomics_Clinical.xlsx`
+- `/content/drive/MyDrive/Radiomics_colab_data/Weights/resnet_18.pth`
+
+실행:
+
+```bash
+python3 scripts/run_colab_pipeline.py \
+  --manifest /content/drive/MyDrive/Radiomics_colab_data/data/manifest.colab.csv \
+  --xlsx-path /content/drive/MyDrive/Radiomics_colab_data/Radiomics_Clinical.xlsx \
+  --weights-path /content/drive/MyDrive/Radiomics_colab_data/Weights/resnet_18.pth \
+  --output-dir /content/drive/MyDrive/Radiomics_colab_data/output
+```
+
+빠른 smoke test로 10명만 먼저 보려면:
+
+```bash
+python3 scripts/run_colab_pipeline.py \
+  --manifest /content/drive/MyDrive/Radiomics_colab_data/data/manifest.colab.csv \
+  --xlsx-path /content/drive/MyDrive/Radiomics_colab_data/Radiomics_Clinical.xlsx \
+  --weights-path /content/drive/MyDrive/Radiomics_colab_data/Weights/resnet_18.pth \
+  --output-dir /content/drive/MyDrive/Radiomics_colab_data/output_smoke \
+  --max-patients 10 \
+  --skip-roc
+```
+
+이 스크립트가 하는 일:
+- generated config 작성
+- MedicalNet weight를 MONAI ResNet18 backbone에 로드
+- deep feature 추출
+- prepared dataset 생성
+- endpoint 모델 fitting
+- ROC PNG 저장
 
 ## Excel 기반 tabular dataset 만들기
 
@@ -188,6 +218,7 @@ python3 scripts/run_image_pipeline.py plot-roc --config config.example.json
 
 ## 구현 메모
 
-- Clinical 시트는 빈 셀이 많고, Radiomics 시트는 헤더가 한 칸 어긋난 구조가 있어서, `openpyxl` 없이도 읽히도록 XML 기반 `.xlsx` 파서를 직접 넣었습니다.
+- NIfTI는 내부적으로 `(z, y, x)` 축 순서로 맞춰서 처리합니다.
+- DICOM/NIfTI에서 spacing을 읽을 수 있으면 `target_spacing` 기준으로 먼저 resample한 뒤, 최종적으로 `target_depth x target_height x target_width`로 resize합니다.
 - Radiomics 시트는 환자당 여러 행이 있을 수 있어, 현재는 numeric scalar feature만 골라 `mean/max/std` 집계가 가능하도록 만들었습니다. 기본값은 `mean + max`입니다.
 - OS/PFS horizon label은 censoring을 고려해서, horizon 이전에 censor되면 해당 endpoint 학습에서 제외합니다.

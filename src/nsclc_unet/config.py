@@ -7,44 +7,57 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class PreprocessingConfig:
-    target_height: int = 256
-    target_width: int = 256
+    target_depth: int = 64
+    target_height: int = 96
+    target_width: int = 96
     hu_min: int = -1000
     hu_max: int = 400
-    min_mask_pixels: int = 8
-    bbox_margin: int = 16
+    bbox_margin: int = 8
+    target_spacing_z: float | None = 2.5
+    target_spacing_y: float | None = 1.0
+    target_spacing_x: float | None = 1.0
 
     @property
-    def target_size(self) -> tuple[int, int]:
-        return (self.target_height, self.target_width)
+    def target_shape(self) -> tuple[int, int, int]:
+        return (self.target_depth, self.target_height, self.target_width)
+
+    @property
+    def target_spacing(self) -> tuple[float, float, float] | None:
+        values = (self.target_spacing_z, self.target_spacing_y, self.target_spacing_x)
+        if any(value is None for value in values):
+            return None
+        return (float(values[0]), float(values[1]), float(values[2]))
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    batch_size: int = 8
-    epochs: int = 30
-    learning_rate: float = 1e-3
-    weight_decay: float = 1e-4
+    batch_size: int = 1
+    epochs: int = 5
+    learning_rate: float = 1e-4
+    weight_decay: float = 1e-5
     validation_fraction: float = 0.2
     random_seed: int = 42
     num_workers: int = 0
-    early_stopping_patience: int = 8
+    early_stopping_patience: int = 3
 
 
 @dataclass(frozen=True)
 class ModelConfig:
+    backbone_name: str = "resnet18"
     in_channels: int = 1
-    out_channels: int = 1
-    base_channels: int = 16
-    dropout: float = 0.1
     embedding_pool: str = "avg"
+    conv1_t_size: int = 7
+    conv1_t_stride: int = 1
+    no_max_pool: bool = False
+    shortcut_type: str = "A"
+    widen_factor: float = 1.0
+    bias_downsample: bool = True
+    weights_path: Path | None = None
 
 
 @dataclass(frozen=True)
 class FeatureConfig:
-    batch_size: int = 16
-    aggregate_mean: bool = True
-    aggregate_max: bool = True
+    batch_size: int = 1
     output_filename: str = "deep_features.csv"
 
 
@@ -106,8 +119,16 @@ def load_config(path: Path) -> PipelineConfig:
 
     preprocessing = PreprocessingConfig(**raw.get("preprocessing", {}))
     training = TrainingConfig(**raw.get("training", {}))
-    model = ModelConfig(**raw.get("model", {}))
+
+    raw_model = dict(raw.get("model", {}))
+    weights_path_raw = raw_model.pop("weights_path", None)
+    model = ModelConfig(
+        weights_path=_resolve_path(base_dir, weights_path_raw) if weights_path_raw else None,
+        **raw_model,
+    )
+
     features = FeatureConfig(**raw.get("features", {}))
+
     raw_tabular = dict(raw.get("tabular", {}))
     xlsx_path_raw = raw_tabular.pop("xlsx_path", None)
     tabular = TabularConfig(
@@ -122,7 +143,7 @@ def load_config(path: Path) -> PipelineConfig:
         config_path=resolved_path,
         manifest_path=_resolve_path(base_dir, raw["manifest_path"]),
         output_dir=output_dir,
-        checkpoint_filename=raw.get("checkpoint_filename", "unet_best.pt"),
+        checkpoint_filename=raw.get("checkpoint_filename", "resnet18_backbone.pt"),
         preprocessing=preprocessing,
         training=training,
         model=model,

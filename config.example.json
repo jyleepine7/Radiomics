@@ -1,36 +1,42 @@
 {
   "manifest_path": "data/manifest.example.csv",
   "output_dir": "artifacts",
-  "checkpoint_filename": "unet_best.pt",
+  "checkpoint_filename": "resnet18_backbone.pt",
   "preprocessing": {
-    "target_height": 256,
-    "target_width": 256,
+    "target_depth": 64,
+    "target_height": 96,
+    "target_width": 96,
     "hu_min": -1000,
     "hu_max": 400,
-    "min_mask_pixels": 8,
-    "bbox_margin": 16
+    "bbox_margin": 8,
+    "target_spacing_z": 2.5,
+    "target_spacing_y": 1.0,
+    "target_spacing_x": 1.0
   },
   "training": {
-    "batch_size": 8,
-    "epochs": 30,
-    "learning_rate": 0.001,
-    "weight_decay": 0.0001,
+    "batch_size": 1,
+    "epochs": 5,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.00001,
     "validation_fraction": 0.2,
     "random_seed": 42,
     "num_workers": 0,
-    "early_stopping_patience": 8
+    "early_stopping_patience": 3
   },
   "model": {
+    "backbone_name": "resnet18",
     "in_channels": 1,
-    "out_channels": 1,
-    "base_channels": 16,
-    "dropout": 0.1,
-    "embedding_pool": "avg"
+    "embedding_pool": "avg",
+    "conv1_t_size": 7,
+    "conv1_t_stride": 1,
+    "no_max_pool": false,
+    "shortcut_type": "A",
+    "widen_factor": 1.0,
+    "bias_downsample": true,
+    "weights_path": null
   },
   "features": {
-    "batch_size": 16,
-    "aggregate_mean": true,
-    "aggregate_max": true,
+    "batch_size": 1,
     "output_filename": "deep_features.csv"
   },
   "tabular": {
